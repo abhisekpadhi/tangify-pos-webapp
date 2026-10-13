@@ -47,22 +47,41 @@ function utf8ByteLength(value: string): number {
 	return new TextEncoder().encode(value).length;
 }
 
+/**
+ * Split a string on UTF-8 byte boundaries in O(n).
+ * The previous char-by-char TextEncoder approach was O(n²) and froze Android
+ * for ~10–15s when chunking ~64KB+ billing state:delta payloads.
+ */
 function splitUtf8String(str: string, maxBytes: number): string[] {
-	const chunks: string[] = [];
-	let current = '';
-
-	for (const char of str) {
-		const candidate = current + char;
-		if (utf8ByteLength(candidate) > maxBytes && current.length > 0) {
-			chunks.push(current);
-			current = char;
-		} else {
-			current = candidate;
-		}
+	if (maxBytes <= 0) {
+		return [str];
+	}
+	const bytes = new TextEncoder().encode(str);
+	if (bytes.length <= maxBytes) {
+		return [str];
 	}
 
-	if (current.length > 0) {
-		chunks.push(current);
+	const decoder = new TextDecoder();
+	const chunks: string[] = [];
+	let offset = 0;
+
+	while (offset < bytes.length) {
+		let end = Math.min(offset + maxBytes, bytes.length);
+		// Back up so we do not cut mid-code-point (continuation bytes are 10xxxxxx).
+		if (end < bytes.length) {
+			while (end > offset && (bytes[end]! & 0xc0) === 0x80) {
+				end -= 1;
+			}
+			if (end === offset) {
+				// Pathological: single code point longer than maxBytes — emit it anyway.
+				end = Math.min(offset + maxBytes, bytes.length);
+				while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) {
+					end += 1;
+				}
+			}
+		}
+		chunks.push(decoder.decode(bytes.subarray(offset, end)));
+		offset = end;
 	}
 
 	return chunks.length > 0 ? chunks : [''];

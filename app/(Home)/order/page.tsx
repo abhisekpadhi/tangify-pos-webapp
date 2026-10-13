@@ -3258,8 +3258,9 @@ export default function OrderPage() {
 		if (session.bill) {
 			await localforage.setItem<TBill>("bill", session.bill);
 		}
-		void notifyOrderOpsChange("billing");
 		router.push("/cart");
+		// After navigate — chunking large billing payloads must not freeze cart paint.
+		void notifyOrderOpsChange("billing");
 	};
 
 	const handleBill = (group: OrderGroup) => {

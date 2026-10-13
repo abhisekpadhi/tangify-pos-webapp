@@ -15,7 +15,11 @@ import {
 	ZERO_ORDER_OPS_VERSIONS,
 	versionsFromLegacyStateVersion,
 } from '@/src/models/order_ops';
-import { BILLING_SESSIONS_KEY, TOrdersStore } from '@/src/models/common';
+import {
+	BILLING_SESSIONS_KEY,
+	BillingSessionState,
+	TOrdersStore,
+} from '@/src/models/common';
 import { getInventorySnapshotForDate, getTodayDateKey } from '@/src/utils/inventory_utils';
 import { getTodayOrderHistory } from '@/src/utils/order_history';
 import { getOrdersStore, maintainOrders } from '@/src/utils/order_utils';
@@ -25,6 +29,24 @@ import { getSupplyInventorySnapshotForDate } from '@/src/utils/supply_inventory_
 import { getWaitlistSnapshotForDate } from '@/src/utils/waitlist_utils';
 import { getServiceRequestsSnapshotForDate } from '@/src/utils/service_requests_utils';
 import { getBillingSessions } from '@/src/utils/billing_state';
+
+/** Drop nested bill.cart (duplicate of session.cart) to keep Ably payloads small. */
+function slimBillingSessionsForSync(
+	sessions: BillingSessionState[]
+): BillingSessionState[] {
+	return sessions.map((session) => {
+		if (!session.bill) {
+			return session;
+		}
+		return {
+			...session,
+			bill: {
+				...session.bill,
+				cart: { items: [] },
+			},
+		};
+	});
+}
 import {
 	BILL_PRINTER_DEVICE_NAME,
 	KOT_PRINTER_DEVICE_NAME,
@@ -280,7 +302,7 @@ export async function buildOrderOpsSnapshot(): Promise<OrderOpsSnapshot> {
 		supplyInventory,
 		waitlist,
 		serviceRequests,
-		billingSessions,
+		billingSessions: slimBillingSessionsForSync(billingSessions),
 		sentAt: Date.now(),
 	};
 }
@@ -370,7 +392,7 @@ export async function buildOrderOpsDomainSnapshot(
 
 	return {
 		...base,
-		billingSessions: await getBillingSessions(),
+		billingSessions: slimBillingSessionsForSync(await getBillingSessions()),
 	};
 }
 

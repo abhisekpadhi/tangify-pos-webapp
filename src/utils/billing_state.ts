@@ -78,7 +78,10 @@ export async function applyBillingSessions(
 	await localforage.setItem(BILLING_CONTEXT_KEY, active.context);
 	await localforage.setItem('cart', active.cart);
 	if (active.bill) {
-		await localforage.setItem('bill', active.bill);
+		// Sync may omit nested bill.cart (duplicate of session.cart) to stay under Ably limits.
+		const billCart =
+			active.bill.cart?.items?.length > 0 ? active.bill.cart : active.cart;
+		await localforage.setItem('bill', { ...active.bill, cart: billCart });
 	}
 }
 

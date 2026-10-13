@@ -210,8 +210,9 @@ const FreeflowPage: React.FC = () => {
     }
     const cart = (await localforage.getItem<TCart>("cart")) ?? { items: [] };
     await saveBillingSession(context, cart);
-    await notifyOrderOpsChange("billing");
     router.push("/cart");
+    // Don't await — Ably billing notify can be large; keep cart interactive.
+    void notifyOrderOpsChange("billing");
     } catch (error) {
       console.error("Failed to open cart:", error);
       alert("Failed to open cart. Please try again.");

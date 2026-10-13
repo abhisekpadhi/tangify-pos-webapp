@@ -765,13 +765,24 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 			});
 
 			channel.subscribe('state:delta', async (message) => {
+				const wire = message.data as StateDeltaWireMessage;
+				const sourceId =
+					wire && typeof wire === 'object' && 'deviceId' in wire
+						? String((wire as { deviceId?: string }).deviceId ?? '')
+						: '';
+				// Skip own publishes (including chunk envelopes) — no UI work.
+				if (sourceId && sourceId === selfDeviceId) {
+					return;
+				}
+
+				// Assemble chunks without toggling the global sync spinner per piece.
+				const complete =
+					stateDeltaChunkAssemblerRef.current.ingest(wire);
+				if (!complete) {
+					return;
+				}
+
 				await runWithSyncIndicator(async () => {
-					const complete = stateDeltaChunkAssemblerRef.current.ingest(
-						message.data as StateDeltaWireMessage
-					);
-					if (!complete) {
-						return;
-					}
 					await handleStateDelta(complete);
 					await refreshMeta();
 				});
