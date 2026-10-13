@@ -15,7 +15,7 @@ import {
 	ZERO_ORDER_OPS_VERSIONS,
 	versionsFromLegacyStateVersion,
 } from '@/src/models/order_ops';
-import { TOrdersStore } from '@/src/models/common';
+import { BILLING_SESSIONS_KEY, TOrdersStore } from '@/src/models/common';
 import { getInventorySnapshotForDate, getTodayDateKey } from '@/src/utils/inventory_utils';
 import { getTodayOrderHistory } from '@/src/utils/order_history';
 import { getOrdersStore, maintainOrders } from '@/src/utils/order_utils';
@@ -184,6 +184,8 @@ export async function getOrderOpsMeta(): Promise<OrderOpsMeta> {
 	const meta = normalizeMetaForToday(stored, today);
 	if (stored.businessDate !== today) {
 		await pruneDayChecklistsForToday(today);
+		// Abandoned checkouts accumulate and blow Ably's 64KiB state:delta limit.
+		await localforage.setItem(BILLING_SESSIONS_KEY, {});
 	}
 	const storedVersions = migrateMetaVersions(stored);
 	const versionsChanged = ORDER_OPS_DOMAINS.some(

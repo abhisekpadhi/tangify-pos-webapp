@@ -8,7 +8,6 @@ import {
 	SyncConflict,
 	SyncConflictResolution,
 	SyncRequestMessage,
-	StateDeltaMessage,
 } from '@/src/models/order_ops';
 import {
 	getDeviceDisplayName,
@@ -49,7 +48,10 @@ import {
 	type SyncTransferProgress,
 } from '@/src/utils/order_ops_sync';
 import {
+	publishStateDeltaChunks,
+	StateDeltaChunkAssembler,
 	SyncResponseChunkAssembler,
+	type StateDeltaWireMessage,
 	type SyncResponseWireMessage,
 } from '@/src/utils/sync_response_chunk';
 import type { SyncConflictPeer } from '@/src/models/order_ops';
@@ -318,6 +320,7 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 	const syncHubOnlineRef = useRef(false);
 	const syncTransferTimerRef = useRef<number | null>(null);
 	const syncChunkAssemblerRef = useRef(new SyncResponseChunkAssembler());
+	const stateDeltaChunkAssemblerRef = useRef(new StateDeltaChunkAssembler());
 
 	useEffect(() => {
 		return subscribeWriteGate(() => {
@@ -756,7 +759,13 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 
 			channel.subscribe('state:delta', async (message) => {
 				await runWithSyncIndicator(async () => {
-					await handleStateDelta(message.data as StateDeltaMessage);
+					const complete = stateDeltaChunkAssemblerRef.current.ingest(
+						message.data as StateDeltaWireMessage
+					);
+					if (!complete) {
+						return;
+					}
+					await handleStateDelta(complete);
 					await refreshMeta();
 				});
 			});
@@ -825,7 +834,9 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 				}
 
 				await runWithSyncIndicator(async () => {
-					await activeChannel.publish('state:delta', snapshot);
+					await publishStateDeltaChunks(async (payload) => {
+						await activeChannel.publish('state:delta', payload);
+					}, snapshot);
 				});
 			});
 
