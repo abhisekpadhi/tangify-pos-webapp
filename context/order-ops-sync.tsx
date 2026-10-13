@@ -212,73 +212,71 @@ type ConnectionHandlers = {
 	onFailed: (stateChange: Ably.ConnectionStateChange) => void;
 };
 
+function isAblyConnectionAlive(realtime: Realtime | null): boolean {
+	if (!realtime) {
+		return false;
+	}
+	const state = realtime.connection.state;
+	return state !== 'closed' && state !== 'closing' && state !== 'failed';
+}
+
 async function teardownAbly(
 	realtime: Realtime | null,
 	channel: RealtimeChannel | null,
 	handlers: ConnectionHandlers | null
 ): Promise<void> {
-	if (realtime && handlers) {
-		realtime.connection.off('connecting', handlers.onConnecting);
-		realtime.connection.off('connected', handlers.onConnected);
-		realtime.connection.off('disconnected', handlers.onDisconnected);
-		realtime.connection.off('failed', handlers.onFailed);
-	}
-
-	if (channel) {
-		try {
-			channel.presence.unsubscribe();
-		} catch {
-			// Presence may not be subscribed yet during hot reload / Strict Mode.
-		}
-
-		try {
-			channel.unsubscribe();
-		} catch {
-			// Channel may already be detached during hot reload / Strict Mode.
-		}
-
-		try {
-			if (
-				channel.state === 'attached' ||
-				channel.state === 'attaching' ||
-				channel.state === 'suspended'
-			) {
-				await channel.presence.leave();
-			}
-		} catch {
-			// Ignore leave errors while tearing down.
-		}
-
-		try {
-			if (
-				channel.state === 'attached' ||
-				channel.state === 'attaching' ||
-				channel.state === 'suspended'
-			) {
-				await channel.detach();
-			}
-		} catch {
-			// Ignore detach errors while tearing down.
-		}
-	}
-
-	if (!realtime) {
-		return;
-	}
-
-	const connectionState = realtime.connection.state;
-	if (
-		connectionState === 'closed' ||
-		connectionState === 'closing' ||
-		connectionState === 'failed'
-	) {
-		return;
-	}
-
+	// Strict Mode / route remounts tear down while Ably is mid-flight.
+	// Never let leave/detach/close rejections bubble to Next's overlay.
 	try {
-		realtime.connection.close();
-	} catch {
-		// Ably can throw if the connection is already closed.
+		if (realtime && handlers) {
+			try {
+				realtime.connection.off('connecting', handlers.onConnecting);
+				realtime.connection.off('connected', handlers.onConnected);
+				realtime.connection.off('disconnected', handlers.onDisconnected);
+				realtime.connection.off('failed', handlers.onFailed);
+			} catch {
+				// Ignore handler cleanup races.
+			}
+		}
+
+		if (channel) {
+			try {
+				channel.presence.unsubscribe();
+			} catch {
+				// Presence may not be subscribed yet during hot reload / Strict Mode.
+			}
+
+			try {
+				channel.unsubscribe();
+			} catch {
+				// Channel may already be detached during hot reload / Strict Mode.
+			}
+
+			const canLeaveOrDetach =
+				isAblyConnectionAlive(realtime) &&
+				(channel.state === 'attached' ||
+					channel.state === 'attaching' ||
+					channel.state === 'suspended');
+
+			if (canLeaveOrDetach) {
+				// Fire-and-forget: awaiting leave/detach often rejects with
+				// "Connection closed" once close() starts (esp. on Android / Strict Mode).
+				void Promise.resolve(channel.presence.leave()).catch(() => {});
+				void Promise.resolve(channel.detach()).catch(() => {});
+			}
+		}
+
+		if (!isAblyConnectionAlive(realtime) || !realtime) {
+			return;
+		}
+
+		try {
+			realtime.close();
+		} catch {
+			// Ably can throw if the connection is already closed.
+		}
+	} catch (error) {
+		console.warn('[ably] teardown ignored:', error);
 	}
 }
 
@@ -918,21 +916,32 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 					new Error(stateChange.reason?.message ?? 'Connection failed')
 				);
 			};
+			const onClosedDuringConnect = () => {
+				cleanupListeners();
+				// Teardown/Strict Mode closed the socket mid-connect — not a hard fail.
+				resolve();
+			};
 
 			const cleanupListeners = () => {
 				realtime.connection.off('connected', onSuccess);
 				realtime.connection.off('failed', onFailure);
+				realtime.connection.off('closed', onClosedDuringConnect);
 			};
 
 			realtime.connection.once('connected', onSuccess);
 			realtime.connection.once('failed', onFailure);
+			realtime.connection.once('closed', onClosedDuringConnect);
 
 			if (realtime.connection.state === 'connected') {
 				onSuccess();
 				return;
 			}
 
-			if (cancelledRef.current) {
+			if (
+				realtime.connection.state === 'closed' ||
+				realtime.connection.state === 'closing' ||
+				cancelledRef.current
+			) {
 				cleanupListeners();
 				resolve();
 				return;
@@ -946,7 +955,8 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 				}
 				setConnectionState('failed');
 				setError(connectError.message);
-				throw connectError;
+				// Do not rethrow — callers use `void connect()` and a rethrow
+				// becomes an unhandled rejection (e.g. "Connection closed" on teardown).
 			})
 			.finally(() => {
 				connectPromiseRef.current = null;
@@ -1116,7 +1126,7 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 				realtimeRef.current,
 				channelRef.current,
 				connectionHandlersRef.current
-			);
+			).catch(() => {});
 			realtimeRef.current = null;
 			channelRef.current = null;
 			connectionHandlersRef.current = null;

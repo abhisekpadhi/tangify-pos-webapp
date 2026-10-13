@@ -26,7 +26,13 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 const padButtonClass =
-	"py-2 rounded-lg text-sm font-semibold transition-colors bg-gray-100 text-gray-800 hover:bg-gray-200";
+	"min-h-[44px] py-2 rounded-lg text-sm font-semibold bg-gray-100 text-gray-800 active:bg-gray-300 touch-manipulation select-none";
+
+function persistCart(next: TCart): void {
+	void localforage.setItem<TCart>("cart", next).catch((error) => {
+		console.error("Failed to persist cart:", error);
+	});
+}
 
 const Cart = () => {
 	const router = useRouter();
@@ -61,13 +67,17 @@ const Cart = () => {
 		}
 		setClearing(true);
 		try {
-			setCart({ items: [] });
-			await localforage.setItem("cart", { items: [] });
+			const emptyCart: TCart = { items: [] };
+			setCart(emptyCart);
+			await localforage.setItem("cart", emptyCart);
 			await localforage.removeItem(BILLING_CONTEXT_KEY);
 			await localforage.setItem("bill", null);
 			if (billingContext.sessionId) {
 				await removeBillingSession(billingContext.sessionId);
-				await notifyOrderOpsChange("billing");
+				// Don't block navigation on Ably publish.
+				void notifyOrderOpsChange("billing").catch((error) => {
+					console.error("Failed to sync billing clear:", error);
+				});
 			}
 			setClearConfirmOpen(false);
 			router.push("/freeflow");
@@ -184,7 +194,10 @@ const Cart = () => {
 			};
 			await localforage.setItem<TBill>("bill", bill);
 			await saveBillingSession(context, cart, bill);
-			await notifyOrderOpsChange("billing");
+			// Local bill is ready — navigate without waiting on Ably (can be large / chunked).
+			void notifyOrderOpsChange("billing").catch((error) => {
+				console.error("Failed to sync billing prepare:", error);
+			});
 			router.push("/bill");
 		} catch (error) {
 			alert("Failed to prepare bill, err:" + error);
@@ -197,15 +210,14 @@ const Cart = () => {
 		if (selectedItem === null) {
 			return;
 		}
-		const newCart = { ...cart };
-		newCart.items.splice(selectedItem, 1);
-
-		localforage.setItem<TCart>("cart", newCart).then(() => {
-			setCart(newCart);
-			setSelectedItem(null);
-			setAttribute("");
-			setChangeTo("");
-		});
+		const newCart: TCart = {
+			items: cart.items.filter((_, index) => index !== selectedItem),
+		};
+		setCart(newCart);
+		setSelectedItem(null);
+		setAttribute("");
+		setChangeTo("");
+		persistCart(newCart);
 	};
 
 	const handleNumPress = (num: number) => {
@@ -229,11 +241,13 @@ const Cart = () => {
 				handleRemove();
 				return;
 			}
-			const newCart = { ...cart };
-			newCart.items[selectedItem].qty = newQty;
-			localforage.setItem<TCart>("cart", newCart).then(() => {
-				setCart(newCart);
-			});
+			const newCart: TCart = {
+				items: cart.items.map((item, index) =>
+					index === selectedItem ? { ...item, qty: newQty } : item
+				),
+			};
+			setCart(newCart);
+			persistCart(newCart);
 		}
 
 		if (attribute === "price") {
@@ -241,11 +255,13 @@ const Cart = () => {
 			if (Number.isNaN(newPrice)) {
 				return;
 			}
-			const newCart = { ...cart };
-			newCart.items[selectedItem].price = newPrice;
-			localforage.setItem<TCart>("cart", newCart).then(() => {
-				setCart(newCart);
-			});
+			const newCart: TCart = {
+				items: cart.items.map((item, index) =>
+					index === selectedItem ? { ...item, price: newPrice } : item
+				),
+			};
+			setCart(newCart);
+			persistCart(newCart);
 		}
 
 		setAttribute("");
@@ -276,8 +292,10 @@ const Cart = () => {
 
 	const modeButtonClass = (mode: string, activeClass: string) => {
 		const isActive = selectedItem !== null && attribute === mode;
-		return `py-2 rounded-lg text-sm font-semibold transition-colors ${
-			isActive ? activeClass : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+		return `min-h-[44px] py-2 rounded-lg text-sm font-semibold touch-manipulation select-none ${
+			isActive
+				? activeClass
+				: "bg-gray-100 text-gray-700 active:bg-gray-300"
 		}`;
 	};
 
@@ -289,7 +307,7 @@ const Cart = () => {
 						type="button"
 						onClick={handleBack}
 						aria-label="Back"
-						className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full bg-white text-gray-700 hover:bg-gray-50 border border-gray-200/80 shadow-md touch-manipulation shrink-0 text-sm font-semibold"
+						className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full bg-white text-gray-700 active:bg-gray-100 border border-gray-200/80 shadow-md touch-manipulation select-none shrink-0 text-sm font-semibold"
 					>
 						←
 					</button>
@@ -305,7 +323,7 @@ const Cart = () => {
 							type="button"
 							onClick={requestClear}
 							disabled={cart.items.length === 0}
-							className="inline-flex min-h-[44px] items-center justify-center rounded-full bg-white text-red-600 hover:bg-red-50 border border-gray-200/80 shadow-md touch-manipulation shrink-0 px-3 text-sm font-semibold disabled:opacity-40 disabled:hover:bg-white"
+							className="inline-flex min-h-[44px] items-center justify-center rounded-full bg-white text-red-600 active:bg-red-50 border border-gray-200/80 shadow-md touch-manipulation select-none shrink-0 px-3 text-sm font-semibold disabled:opacity-40"
 						>
 							Clear
 						</button>
@@ -315,7 +333,7 @@ const Cart = () => {
 				</div>
 			</div>
 
-			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-white">
+			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-white touch-pan-y">
 				{cart.items.length === 0 ? (
 					<div className="text-center py-16 text-gray-500 text-sm">
 						Cart is empty
@@ -326,10 +344,10 @@ const Cart = () => {
 							type="button"
 							key={`${item.name}-${index}`}
 							onClick={() => handleCartItemSelect(index)}
-							className={`w-full flex justify-between items-center py-3 px-6 text-left border-b border-gray-100 border-l-4 transition-colors ${
+							className={`w-full flex justify-between items-center py-3 px-6 text-left border-b border-gray-100 border-l-4 touch-manipulation select-none ${
 								selectedItem === index
 									? "bg-green-100 border-l-green-500"
-									: "bg-white border-l-transparent hover:bg-gray-50"
+									: "bg-white border-l-transparent active:bg-gray-50"
 							}`}
 						>
 							<div>
@@ -344,14 +362,14 @@ const Cart = () => {
 				)}
 			</div>
 
-			<div className="shrink-0 bg-white border-t px-6 pt-3 pb-[calc(10px+env(safe-area-inset-bottom,0px))] shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
+			<div className="shrink-0 bg-white border-t px-6 pt-3 pb-[calc(10px+env(safe-area-inset-bottom,0px))] shadow-[0_-4px_12px_rgba(0,0,0,0.06)] touch-manipulation">
 				<button
 					type="button"
 					disabled={attribute === ""}
 					onClick={handleSave}
-					className={`w-full py-2.5 rounded-lg text-sm font-semibold mb-3 transition-colors ${
+					className={`w-full min-h-[44px] py-2.5 rounded-lg text-sm font-semibold mb-3 touch-manipulation select-none ${
 						attribute !== ""
-							? "bg-green-500 text-white hover:bg-green-600"
+							? "bg-green-500 text-white active:bg-green-700"
 							: "bg-gray-100 text-gray-400 cursor-not-allowed"
 					}`}
 				>
@@ -381,10 +399,10 @@ const Cart = () => {
 						type="button"
 						disabled={selectedItem === null}
 						onClick={handleRemove}
-						className={`py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40 ${
+						className={`min-h-[44px] py-2 rounded-lg text-sm font-semibold touch-manipulation select-none disabled:opacity-40 ${
 							selectedItem === null
 								? "bg-gray-100 text-gray-400"
-								: "bg-red-100 text-red-700 hover:bg-red-200"
+								: "bg-red-100 text-red-700 active:bg-red-200"
 						}`}
 					>
 						Remove
@@ -413,7 +431,7 @@ const Cart = () => {
 						type="button"
 						disabled={processing || cart.items.length === 0}
 						onClick={() => void onClickPay()}
-						className="col-span-2 py-2.5 rounded-lg bg-green-500 hover:bg-green-600 text-white text-sm font-bold disabled:opacity-50 transition-colors"
+						className="col-span-2 min-h-[44px] py-2.5 rounded-lg bg-green-500 active:bg-green-700 text-white text-sm font-bold disabled:opacity-50 touch-manipulation select-none"
 					>
 						{processing
 							? "Processing…"
