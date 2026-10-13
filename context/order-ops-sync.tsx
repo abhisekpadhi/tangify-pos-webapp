@@ -319,6 +319,15 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 	const syncTransferTimerRef = useRef<number | null>(null);
 	const syncChunkAssemblerRef = useRef(new SyncResponseChunkAssembler());
 	const stateDeltaChunkAssemblerRef = useRef(new StateDeltaChunkAssembler());
+	const setupRealtimeRef = useRef<(selfDeviceId: string) => void>(() => {});
+	const connectRef = useRef<() => Promise<void> | void>(() => {});
+	const refreshMemberCountRef = useRef<
+		(
+			channel: RealtimeChannel,
+			selfClientId: string,
+			options?: { checkConflict?: boolean; fullscreenCatchUp?: boolean }
+		) => Promise<void>
+	>(async () => {});
 
 	useEffect(() => {
 		return subscribeWriteGate(() => {
@@ -646,7 +655,7 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 
 					await channel.presence.enter(data);
 					await refreshMeta();
-					await refreshMemberCount(channel, selfDeviceId, {
+					await refreshMemberCountRef.current(channel, selfDeviceId, {
 						checkConflict: true,
 					});
 				} catch (presenceError) {
@@ -808,12 +817,12 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 			});
 
 			channel.presence.subscribe('enter', () => {
-				void refreshMemberCount(channel, selfDeviceId, {
+				void refreshMemberCountRef.current(channel, selfDeviceId, {
 					checkConflict: true,
 				});
 			});
 			channel.presence.subscribe(['leave', 'update'], () => {
-				void refreshMemberCount(channel, selfDeviceId);
+				void refreshMemberCountRef.current(channel, selfDeviceId);
 			});
 
 			registerOrderOpsPublisher(async (snapshot: OrderOpsSnapshot) => {
@@ -1066,6 +1075,10 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 		[refreshMeta, runWithSyncIndicator, beginSyncTransfer]
 	);
 
+	setupRealtimeRef.current = setupRealtime;
+	connectRef.current = connect;
+	refreshMemberCountRef.current = refreshMemberCount;
+
 	useEffect(() => {
 		if (typeof window === 'undefined') {
 			return;
@@ -1076,8 +1089,8 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 		selfDeviceIdRef.current = selfDeviceId;
 		setDeviceId(selfDeviceId);
 		setDeviceName(getDeviceDisplayName());
-		setupRealtime(selfDeviceId);
-		void connect();
+		setupRealtimeRef.current(selfDeviceId);
+		void connectRef.current();
 
 		const attemptSyncFromPeers = () => {
 			const channel = channelRef.current;
@@ -1087,12 +1100,14 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 			}
 
 			resetSyncRequestCooldown();
-			void refreshMemberCount(channel, selfClientId, {
-				checkConflict: true,
-				fullscreenCatchUp: true,
-			}).catch((presenceError) => {
-				console.error('Failed to refresh sync on focus:', presenceError);
-			});
+			void refreshMemberCountRef
+				.current(channel, selfClientId, {
+					checkConflict: true,
+					fullscreenCatchUp: true,
+				})
+				.catch((presenceError) => {
+					console.error('Failed to refresh sync on focus:', presenceError);
+				});
 		};
 
 		const onWindowFocus = () => {
@@ -1132,7 +1147,9 @@ export function OrderOpsSyncProvider({ children }: { children: ReactNode }) {
 			connectionHandlersRef.current = null;
 			connectPromiseRef.current = null;
 		};
-	}, [connect, setupRealtime, refreshMemberCount]);
+		// Keep a single Ably realtime for the provider lifetime. Recreating it on
+		// callback identity changes freezes Android carts for ~10–15s behind overlays.
+	}, []);
 
 	const connected = connectionState === 'connected';
 

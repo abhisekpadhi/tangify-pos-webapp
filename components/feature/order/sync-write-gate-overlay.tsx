@@ -4,6 +4,7 @@ import { useOrderOpsSync } from '@/context/order-ops-sync';
 import { isKotPrinterOnline } from '@/src/utils/print_servers';
 import { maxOrderOpsVersion } from '@/src/models/order_ops';
 import { LoadingSpinner } from '@/components/ui/touch-controls';
+import { usePathname } from 'next/navigation';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useInFlightLock } from '@/src/utils/in_flight';
 
@@ -23,8 +24,25 @@ function offlineServicesBanner(
 	return 'KOT printer offline — auto KOT paused; print KOT manually';
 }
 
+/** Billing / checkout must stay tappable — never cover with sync catch-up modal. */
+function isBillingPath(pathname: string | null): boolean {
+	if (!pathname) {
+		return false;
+	}
+	return (
+		pathname === '/cart' ||
+		pathname === '/bill' ||
+		pathname === '/payment' ||
+		pathname === '/freeflow' ||
+		pathname.startsWith('/bill/') ||
+		pathname.startsWith('/cart/')
+	);
+}
+
 /** Soft banner + fullscreen catch-up / hub-offline notices. */
 export function SyncWriteGateOverlay() {
+	const pathname = usePathname();
+	const billingFlow = isBillingPath(pathname);
 	const {
 		catchUpUi,
 		syncHubOnline,
@@ -71,7 +89,16 @@ export function SyncWriteGateOverlay() {
 		};
 	}, []);
 
-	const isOffline = !browserOnline || connectionState !== 'connected';
+	// Only hard-block when the browser is offline or Ably has failed.
+	// `connecting` / brief `idle` used to cover the whole UI for 10–15s on Android
+	// while the socket came back — cart taps did nothing until then.
+	const hardOffline =
+		!browserOnline || connectionState === 'failed';
+	const reconnecting =
+		browserOnline &&
+		!hardOffline &&
+		(connectionState === 'connecting' ||
+			(connectionState === 'idle' && !connected));
 	const checking =
 		checkingStatus || connectionState === 'connecting';
 
@@ -80,8 +107,13 @@ export function SyncWriteGateOverlay() {
 		connected && writeGate === 'ready'
 			? offlineServicesBanner(syncHubOnline, kotPrinterOnline)
 			: null;
-	const showCatchUpBanner = catchUpUi === 'banner';
-	const showTopBanner = showCatchUpBanner || Boolean(offlineBanner);
+	const showCatchUpBanner = catchUpUi === 'banner' || (catchUpUi === 'fullscreen' && billingFlow);
+	const showReconnectBanner = reconnecting && !showCatchUpBanner;
+	const showTopBanner =
+		showCatchUpBanner || showReconnectBanner || Boolean(offlineBanner);
+	// Never fullscreen-block billing; allow soft banner only.
+	const showCatchUpFullscreen =
+		!billingFlow && !hardOffline && catchUpUi === 'fullscreen';
 
 	useLayoutEffect(() => {
 		const root = document.documentElement;
@@ -113,7 +145,7 @@ export function SyncWriteGateOverlay() {
 			applyHeight(0);
 			delete root.dataset.opsTopBanner;
 		};
-	}, [showTopBanner, showCatchUpBanner, offlineBanner]);
+	}, [showTopBanner, showCatchUpBanner, showReconnectBanner, offlineBanner]);
 
 	const handleCheckStatus = async () => {
 		if (!checkLock.tryLock()) {
@@ -133,25 +165,36 @@ export function SyncWriteGateOverlay() {
 		}
 	};
 
+	const topBanner = showCatchUpBanner ? (
+		<div
+			ref={topBannerRef}
+			className="fixed top-0 inset-x-0 z-[60] bg-amber-500 text-amber-950 text-center text-sm font-semibold px-3 pb-2 shadow pt-[max(0.5rem,env(safe-area-inset-top,0px))]"
+		>
+			{catchUpProgressLabel}
+		</div>
+	) : showReconnectBanner ? (
+		<div
+			ref={topBannerRef}
+			className="fixed top-0 inset-x-0 z-[60] bg-amber-500 text-amber-950 text-center text-sm font-semibold px-3 pb-2 shadow pt-[max(0.5rem,env(safe-area-inset-top,0px))]"
+		>
+			{connectionState === 'connecting'
+				? 'Connecting sync…'
+				: 'Reconnecting sync…'}
+		</div>
+	) : offlineBanner ? (
+		<div
+			ref={topBannerRef}
+			className="fixed top-0 inset-x-0 z-[55] bg-orange-600 text-white text-center text-sm font-semibold px-3 pb-2 shadow pt-[max(0.5rem,env(safe-area-inset-top,0px))]"
+		>
+			{offlineBanner}
+		</div>
+	) : null;
+
 	return (
 		<>
-			{showCatchUpBanner ? (
-				<div
-					ref={topBannerRef}
-					className="fixed top-0 inset-x-0 z-[60] bg-amber-500 text-amber-950 text-center text-sm font-semibold px-3 pb-2 shadow pt-[max(0.5rem,env(safe-area-inset-top,0px))]"
-				>
-					{catchUpProgressLabel}
-				</div>
-			) : offlineBanner ? (
-				<div
-					ref={topBannerRef}
-					className="fixed top-0 inset-x-0 z-[55] bg-orange-600 text-white text-center text-sm font-semibold px-3 pb-2 shadow pt-[max(0.5rem,env(safe-area-inset-top,0px))]"
-				>
-					{offlineBanner}
-				</div>
-			) : null}
+			{topBanner}
 
-			{!isOffline && catchUpUi === 'fullscreen' ? (
+			{showCatchUpFullscreen ? (
 				<div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 px-6">
 					<div className="w-full max-w-sm rounded-2xl bg-white px-6 py-8 text-center shadow-xl">
 						<div className="mx-auto mb-4 h-10 w-10 rounded-full border-4 border-gray-200 border-t-black animate-spin" />
@@ -171,7 +214,7 @@ export function SyncWriteGateOverlay() {
 				</div>
 			) : null}
 
-			{!isOffline && writeGate === 'sync_failed' ? (
+			{!hardOffline && writeGate === 'sync_failed' && !billingFlow ? (
 				<div
 					className="fixed inset-0 z-[75] flex items-center justify-center bg-black/55 px-6"
 					role="alertdialog"
@@ -277,7 +320,7 @@ export function SyncWriteGateOverlay() {
 				</div>
 			) : null}
 
-			{isOffline ? (
+			{hardOffline ? (
 				<div
 					className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-6"
 					role="alertdialog"
@@ -289,7 +332,9 @@ export function SyncWriteGateOverlay() {
 							id="ops-offline-title"
 							className="text-lg font-bold text-gray-900"
 						>
-							You are offline, get online to continue
+							{!browserOnline
+								? 'You are offline, get online to continue'
+								: 'Sync connection failed'}
 						</h2>
 						<button
 							type="button"
